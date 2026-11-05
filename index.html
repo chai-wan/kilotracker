@@ -59,6 +59,7 @@
   .metric{flex:1;background:var(--panel2);border-radius:10px;padding:9px 8px;text-align:center;}
   .metric .k{font-size:10px;color:var(--text-dim);}
   .metric .v{font-size:14px;font-family:var(--mono);margin-top:3px;}
+  .readout.stale{opacity:.35;} .substatus.alert{color:var(--danger);font-weight:600;}
   .metric .v.warn{color:var(--danger);} .metric .v.ok{color:var(--accent2);}
 
   .btn{display:block;width:100%;text-align:center;padding:14px;border-radius:12px;border:none;
@@ -188,15 +189,19 @@ function projectOn(P,CUM,lat,lon){
 }
 function fmtKM(m){const neg=m<0;m=Math.abs(Math.round(m));return{k:(neg?'-':'')+Math.floor(m/1000),m:String(m%1000).padStart(3,'0')};}
 
-let watchId=null,curLine=null,lastFix=null,lastKm=null,calAnchors=[];
+let watchId=null,curLine=null,lastFix=null,lastKm=null,calAnchors=[],staleTimer=null;
+const ACC_WARN=50, ACC_CAL=20, STALE_MS=15000;
 
 // ---- calibration storage (per line) ----
-async function loadCal(name){
-  try{const r=await window.storage.get('cal2:'+name,false);calAnchors=r&&r.value?JSON.parse(r.value):[];}
+function loadCal(name){
+  try{const v=localStorage.getItem('cal2:'+name);calAnchors=v?JSON.parse(v):[];}
   catch(e){calAnchors=[];}
   renderCal();
 }
-async function saveCal(name){try{await window.storage.set('cal2:'+name,JSON.stringify(calAnchors),false);}catch(e){}}
+function saveCal(name){
+  try{localStorage.setItem('cal2:'+name,JSON.stringify(calAnchors));}
+  catch(e){toast('⚠ 補正を端末に保存できませんでした');}
+}
 function calOffsetAt(km){
   if(calAnchors.length===0) return 0;
   const a=[...calAnchors].sort((x,y)=>x.at-y.at);
@@ -220,7 +225,7 @@ function renderCal(){
       <span class="del" data-i="${calAnchors.indexOf(c)}">削除</span></div>`;
   }).join('');
   el.querySelectorAll('.del').forEach(b=>b.addEventListener('click',()=>{
-    calAnchors.splice(+b.dataset.i,1);saveCal(curLine);renderCal();if(lastFix)onFix({coords:{...lastFix,accuracy:0}});
+    calAnchors.splice(+b.dataset.i,1);saveCal(curLine);renderCal();if(lastFix)onFix({coords:lastFix});
   }));
 }
 
@@ -254,8 +259,9 @@ function renderStations(){
 
 // ---- main fix handler ----
 function onFix(pos){
-  const {latitude:lat,longitude:lon,accuracy:acc}=pos.coords;lastFix={latitude:lat,longitude:lon};
-  document.getElementById('mAcc').textContent=Math.round(acc)+' m';
+  const {latitude:lat,longitude:lon,accuracy:acc}=pos.coords;
+  if(pos.timestamp!==undefined) lastFix={latitude:lat,longitude:lon,accuracy:acc,t:Date.now()};
+  const accEl=document.getElementById('mAcc');accEl.textContent=Math.round(acc)+' m';accEl.className='v '+(acc>ACC_WARN?'warn':'ok');
   const L=lineData(curLine);
   const pr=projectOn(L.P,L.CUM,lat,lon);
   const offEl=document.getElementById('mOff');offEl.textContent=Math.round(pr.d)+' m';
@@ -280,8 +286,11 @@ function onFix(pos){
   let prev=sts[0],next=sts[sts.length-1];
   for(let i=0;i<sts.length-1;i++){if(baseKm>=sts[i].km&&baseKm<=sts[i+1].km){prev=sts[i];next=sts[i+1];break;}}
   document.getElementById('context').textContent=prev.name+' 〜 '+next.name;
-  document.getElementById('sub').innerHTML=(pr.d>200?'⚠ 線路から離れています。線区が違う可能性があります':
-    'この線区上'+(calAnchors.length?' <span class="calibrated">(補正適用中)</span>':''));
+  const subEl=document.getElementById('sub');
+  if(acc>ACC_WARN){subEl.innerHTML='⚠ GPS精度が低いため値は目安です(±'+Math.round(acc)+'m)';subEl.classList.add('alert');}
+  else if(pr.d>200){subEl.innerHTML='⚠ 線路から離れています。線区が違う可能性があります';subEl.classList.add('alert');}
+  else{subEl.innerHTML='この線区上'+(calAnchors.length?' <span class="calibrated">(補正適用中)</span>':'');subEl.classList.remove('alert');}
+  document.querySelector('.readout').classList.toggle('stale',acc>ACC_WARN);
 
   const pct=Math.max(0,Math.min(100,pr.along/L.len*100));
   document.getElementById('pFill').style.width=pct+'%';document.getElementById('pDot').style.left=pct+'%';
@@ -292,14 +301,38 @@ document.getElementById('toggle').addEventListener('click',()=>{
   const b=document.getElementById('toggle');
   if(watchId===null){
     if(!navigator.geolocation){toast('GPS非対応の端末です');return;}
-    watchId=navigator.geolocation.watchPosition(onFix,e=>toast('測位エラー: '+e.message),
+    watchId=navigator.geolocation.watchPosition(onFix,onGeoErr,
       {enableHighAccuracy:true,maximumAge:1000,timeout:10000});
+    staleTimer=setInterval(checkStale,2000);
     b.textContent='GPSを停止';b.classList.remove('btn-primary');b.classList.add('btn-stop');
     document.getElementById('sub').textContent='測位中...';
-  }else{navigator.geolocation.clearWatch(watchId);watchId=null;
+  }else{stopWatch();
     b.textContent='GPSを開始';b.classList.add('btn-primary');b.classList.remove('btn-stop');
     document.getElementById('sub').textContent='停止中';}
 });
+
+function stopWatch(){
+  if(watchId!==null)navigator.geolocation.clearWatch(watchId);watchId=null;
+  clearInterval(staleTimer);staleTimer=null;
+  const b=document.getElementById('toggle');
+  b.textContent='GPSを開始';b.classList.add('btn-primary');b.classList.remove('btn-stop');
+  document.querySelector('.readout').classList.add('stale');
+}
+function onGeoErr(e){
+  if(e.code===1){stopWatch();toast('位置情報が許可されていません。設定で許可してください');
+    const s=document.getElementById('sub');s.textContent='⚠ 位置情報が許可されていません';s.classList.add('alert');return;}
+  checkStale(); // タイムアウト等は途絶表示に任せ、毎回のトーストは出さない
+}
+function checkStale(){
+  if(watchId===null)return;
+  const s=document.getElementById('sub');
+  const age=lastFix?Date.now()-lastFix.t:Infinity;
+  if(age>STALE_MS){
+    document.querySelector('.readout').classList.add('stale');
+    s.textContent=lastFix?'⚠ 測位が途絶えています(最終 '+Math.round(age/1000)+'秒前の値)':'⚠ 測位できていません(屋外・上空の開けた場所で待ってください)';
+    s.classList.add('alert');
+  }
+}
 
 // nearest-line detection
 document.getElementById('detectBtn').addEventListener('click',()=>{
@@ -311,7 +344,7 @@ document.getElementById('detectBtn').addEventListener('click',()=>{
     }
     selectLine(best.name);
     toast('最寄り: '+best.name+' (線路から'+Math.round(best.d)+'m)');
-    if(lastFix)onFix({coords:{...lastFix,accuracy:0}});
+    if(lastFix)onFix({coords:lastFix});
   };
   if(lastFix){go(lastFix.latitude,lastFix.longitude);}
   else if(navigator.geolocation){toast('現在地を取得中...');
@@ -322,12 +355,14 @@ document.getElementById('detectBtn').addEventListener('click',()=>{
 // add calibration point
 document.getElementById('calBtn').addEventListener('click',()=>{
   if(!lastFix){toast('先にGPSを開始してください');return;}
+  if(Date.now()-lastFix.t>STALE_MS){toast('測位が古いため登録できません。GPSの更新を待ってください');return;}
+  if(lastFix.accuracy>ACC_CAL){toast('GPS精度が±'+Math.round(lastFix.accuracy)+'mのため登録できません(±'+ACC_CAL+'m以内で登録)');return;}
   const km=parseFloat(document.getElementById('calKm').value),m=parseFloat(document.getElementById('calM').value);
   if(isNaN(km)||isNaN(m)){toast('キロ程標の値(kとm)を入力してください');return;}
   const L=lineData(curLine);const pr=projectOn(L.P,L.CUM,lastFix.latitude,lastFix.longitude);
   const baseKm=L.origin+pr.along;const actual=km*1000+m;
   calAnchors.push({at:baseKm,off:actual-baseKm});
-  saveCal(curLine);renderCal();onFix({coords:{...lastFix,accuracy:0}});
+  saveCal(curLine);renderCal();onFix({coords:lastFix});
   document.getElementById('calKm').value='';document.getElementById('calM').value='';
   toast('補正点を追加しました');
 });

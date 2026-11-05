@@ -1,6 +1,6 @@
 // 東北本部 キロ程トラッカー Service Worker
 // バージョンを上げると古いキャッシュを破棄して更新される
-const CACHE = 'kilotracker-v1';
+const CACHE = 'kilotracker-v2';
 const ASSETS = [
   './',
   './index.html',
